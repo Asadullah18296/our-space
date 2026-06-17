@@ -71,6 +71,33 @@ const classifyVideoLink = (url) => {
   return "link";
 };
 
+// Upload a file to a Storage bucket with a LIVE progress percentage.
+// We ask Supabase for a one-time signed upload URL, then PUT the file straight
+// to it with XHR so we can read upload.onprogress (the normal .upload() can't).
+// This is a direct upload — as fast as the connection allows — and shows %.
+const uploadWithProgress = (bucket, path, file, onProgress) =>
+  new Promise(async (resolve) => {
+    try {
+      const { data, error } = await supabase.storage.from(bucket).createSignedUploadUrl(path);
+      if (error || !data?.signedUrl) { resolve({ error: error || new Error("no upload url") }); return; }
+      const fd = new FormData();
+      fd.append("cacheControl", "3600");
+      fd.append("", file, file.name);
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", data.signedUrl, true);
+      xhr.setRequestHeader("x-upsert", "false");
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+      };
+      xhr.onload = () =>
+        resolve(xhr.status >= 200 && xhr.status < 300 ? { error: null } : { error: new Error("HTTP " + xhr.status) });
+      xhr.onerror = () => resolve({ error: new Error("network error") });
+      xhr.send(fd);
+    } catch (err) {
+      resolve({ error: err });
+    }
+  });
+
 // Fetch title / author / thumbnail for a media link (CORS-friendly, no key needed).
 const fetchLinkMeta = async (url) => {
   try {
@@ -167,6 +194,14 @@ function GlobalStyles() {
       .us-link:hover { color: var(--accent); text-decoration: underline; }
 
       .us-spin { animation: us-spin .8s linear infinite; }
+
+      .us-progress { height: 9px; border-radius: 999px; background: var(--night-deep); overflow: hidden; border: 1px solid var(--line); }
+      .us-progress-bar { height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .18s ease; }
+
+      .us-drop { border: 1.5px dashed var(--line); border-radius: 16px; background: var(--night-deep);
+        transition: border-color .2s, background .2s; cursor: pointer; }
+      .us-drop:hover { border-color: var(--accent); background: rgba(255,255,255,.02); }
+      .us-drop.drag { border-color: var(--accent); background: rgba(255,255,255,.05); }
 
       audio { filter: saturate(.9); }
 
@@ -666,7 +701,8 @@ function Routine({ me, partner, myName, partnerName, myId, plans, flash, reload 
 // ---------- Photos ----------
 function Images({ photos, myId, idToName, flash, reload }) {
   const [viewer, setViewer] = useState(null);   // image opened full-screen
-  const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState(null); // null = idle, else 0..100
+  const uploading = progress !== null;
 
   const handleFile = async (e) => {
     const file = e.target.files?.[0];
@@ -676,13 +712,13 @@ function Images({ photos, myId, idToName, flash, reload }) {
       flash("Image is larger than 20 MB — please pick a smaller one.");
       return;
     }
-    setUploading(true);
+    setProgress(0);
     const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
     const path = `${todayStr()}/${crypto.randomUUID()}.${ext}`;
-    const up = await supabase.storage.from("photos").upload(path, file, { contentType: file.type, upsert: false });
-    if (up.error) { setUploading(false); flash("Upload failed — please try again."); return; }
+    const up = await uploadWithProgress("photos", path, file, setProgress);
+    if (up.error) { setProgress(null); flash("Upload failed — please try again."); return; }
     const { error } = await supabase.from("photos").insert({ day: todayStr(), path, caption: file.name, author: myId });
-    setUploading(false);
+    setProgress(null);
     if (error) { flash("Saved the file but couldn't list it — try again."); return; }
     await reload();
   };
@@ -723,11 +759,17 @@ function Images({ photos, myId, idToName, flash, reload }) {
             </div>
           </div>
         </div>
-        <label className="us-btn us-btn-primary" style={{ padding: "12px 20px", position: "relative", opacity: uploading ? 0.7 : 1 }}>
-          {uploading ? <Heart size={16} className="us-spin" /> : <Upload size={16} />} {uploading ? "Uploading…" : "Add photo"}
+        <label className="us-btn us-btn-primary" style={{ padding: "12px 20px", position: "relative", opacity: uploading ? 0.8 : 1, minWidth: uploading ? 132 : 0 }}>
+          {uploading ? <><Upload size={16} /> {progress}%</> : <><Upload size={16} /> Add photo</>}
           <input type="file" accept="image/*" onChange={handleFile} disabled={uploading} style={{ display: "none" }} />
         </label>
       </div>
+
+      {uploading && (
+        <div className="us-progress us-enter" style={{ margin: "-8px 0 20px" }}>
+          <div className="us-progress-bar" style={{ width: `${progress}%` }} />
+        </div>
+      )}
 
       {photos.length === 0 ? (
         <div className="us-card" style={{ textAlign: "center", padding: "52px 22px" }}>
@@ -865,7 +907,8 @@ function MusicSection({ songs, myId, myName, flash, reload }) {
   const [loading, setLoading] = useState(false);
   const [panel, setPanel] = useState(null);     // null | "link" | "upload"
   const [playing, setPlaying] = useState(null);  // the row currently in the player
-  const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState(null); // null = idle, else 0..100
+  const uploading = progress !== null;
   const fileInput = useRef(null);
 
   // Pull title/artist/cover from the link automatically.
@@ -910,11 +953,11 @@ function MusicSection({ songs, myId, myName, flash, reload }) {
       flash("File larger than 25 MB — please use a shorter track.");
       return;
     }
-    setUploading(true);
+    setProgress(0);
     const ext = (file.name.split(".").pop() || "mp3").toLowerCase();
     const path = `${crypto.randomUUID()}.${ext}`;
-    const up = await supabase.storage.from("music").upload(path, file, { contentType: file.type, upsert: false });
-    if (up.error) { setUploading(false); flash("Upload failed — please try again."); return; }
+    const up = await uploadWithProgress("music", path, file, setProgress);
+    if (up.error) { setProgress(null); flash("Upload failed — please try again."); return; }
     const { error } = await supabase.from("songs").insert({
       kind: "audio",
       title: file.name.replace(/\.[^.]+$/, ""),
@@ -922,7 +965,7 @@ function MusicSection({ songs, myId, myName, flash, reload }) {
       path,
       added_by: myId,
     });
-    setUploading(false);
+    setProgress(null);
     if (error) { flash("Saved the file but couldn't list it — try again."); return; }
     await reload();
   };
@@ -1010,11 +1053,16 @@ function MusicSection({ songs, myId, myName, flash, reload }) {
               </div>
             </div>
             <button className="us-btn us-btn-primary" onClick={() => fileInput.current?.click()} disabled={uploading}
-              style={{ padding: "10px 18px", whiteSpace: "nowrap" }}>
-              {uploading ? <Heart size={16} className="us-spin" /> : <Upload size={16} />} {uploading ? "Uploading…" : "Choose file"}
+              style={{ padding: "10px 18px", whiteSpace: "nowrap", minWidth: uploading ? 120 : 0 }}>
+              <Upload size={16} /> {uploading ? `${progress}%` : "Choose file"}
             </button>
             <input ref={fileInput} type="file" accept="audio/*,.mp3,.m4a,.flac" onChange={handleUpload} style={{ display: "none" }} />
           </div>
+          {uploading && (
+            <div className="us-progress us-enter" style={{ marginTop: 14 }}>
+              <div className="us-progress-bar" style={{ width: `${progress}%` }} />
+            </div>
+          )}
         </section>
       )}
 
@@ -1152,7 +1200,8 @@ function VideosSection({ videos, myId, myName, flash, reload }) {
   const [loading, setLoading] = useState(false);
   const [panel, setPanel] = useState(null);   // null | "link" | "upload"
   const [playing, setPlaying] = useState(null);
-  const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState(null); // null = idle, else 0..100
+  const [dragging, setDragging] = useState(false);
   const fileInput = useRef(null);
 
   const lookUp = async (link) => {
@@ -1184,10 +1233,8 @@ function VideosSection({ videos, myId, myName, flash, reload }) {
     await reload();
   };
 
-  const handleUpload = async (e) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
+  const uploadVideo = async (file) => {
+    if (!file || progress !== null) return;
     if (!/video\//.test(file.type) && !/\.(mp4|mov|webm|m4v|ogg)$/i.test(file.name)) {
       flash("That doesn't look like a video — pick an mp4/mov.");
       return;
@@ -1196,11 +1243,11 @@ function VideosSection({ videos, myId, myName, flash, reload }) {
       flash("Video larger than 50 MB — please use a shorter clip.");
       return;
     }
-    setUploading(true);
+    setProgress(0);
     const ext = (file.name.split(".").pop() || "mp4").toLowerCase();
     const path = `${crypto.randomUUID()}.${ext}`;
-    const up = await supabase.storage.from("videos").upload(path, file, { contentType: file.type, upsert: false });
-    if (up.error) { setUploading(false); flash("Upload failed — please try again."); return; }
+    const up = await uploadWithProgress("videos", path, file, setProgress);
+    if (up.error) { setProgress(null); flash("Upload failed — please try again."); return; }
     const { error } = await supabase.from("videos").insert({
       kind: "file",
       title: file.name.replace(/\.[^.]+$/, ""),
@@ -1208,9 +1255,21 @@ function VideosSection({ videos, myId, myName, flash, reload }) {
       path,
       added_by: myId,
     });
-    setUploading(false);
+    setProgress(null);
     if (error) { flash("Saved the file but couldn't list it — try again."); return; }
     await reload();
+  };
+
+  const handleUpload = (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    uploadVideo(file);
+  };
+
+  const onDrop = (e) => {
+    e.preventDefault();
+    setDragging(false);
+    uploadVideo(e.dataTransfer.files?.[0]);
   };
 
   const removeVideo = async (v) => {
@@ -1276,20 +1335,46 @@ function VideosSection({ videos, myId, myName, flash, reload }) {
       )}
 
       {panel === "upload" && (
-        <section className="us-card us-enter" style={{ minWidth: 0, background: "linear-gradient(135deg, var(--surface), var(--surface2))" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-            <div style={{ flex: "1 1 200px", minWidth: 0 }}>
-              <div className="us-serif" style={{ fontSize: 20, fontWeight: 600, color: "var(--accent2)" }}>Upload a video</div>
-              <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 2 }}>
-                A short clip (up to 50 MB), stored privately. Videos clear after 2 days.
+        <section className="us-card us-enter" style={{ minWidth: 0 }}>
+          {progress !== null ? (
+            // ---- Live upload progress ----
+            <div>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 15, fontWeight: 600, color: "var(--accent2)" }}>
+                  <Upload size={16} /> Uploading your video…
+                </span>
+                <span style={{ fontSize: 15, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{progress}%</span>
+              </div>
+              <div className="us-progress"><div className="us-progress-bar" style={{ width: `${progress}%` }} /></div>
+              <p style={{ color: "var(--muted)", fontSize: 12, margin: "10px 0 0" }}>
+                Keep this tab open — it’s sending straight to your private cloud.
+              </p>
+            </div>
+          ) : (
+            // ---- Clean drop zone ----
+            <div
+              className={`us-drop${dragging ? " drag" : ""}`}
+              onClick={() => fileInput.current?.click()}
+              onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+              onDragLeave={() => setDragging(false)}
+              onDrop={onDrop}
+              role="button" tabIndex={0}
+              onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && fileInput.current?.click()}
+              style={{ padding: "30px 22px", textAlign: "center" }}
+            >
+              <span style={{ width: 54, height: 54, borderRadius: 16, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "center",
+                background: "linear-gradient(135deg, var(--accent), var(--accent2))", boxShadow: "0 8px 22px var(--glow)" }}>
+                <Upload size={24} color="var(--on-accent)" />
+              </span>
+              <div className="us-serif" style={{ fontSize: 20, fontWeight: 600, color: "var(--text)", marginTop: 12 }}>
+                Drop a video here, or tap to choose
+              </div>
+              <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 4 }}>
+                Short clip, up to 50 MB · stored privately · clears after 2 days
               </div>
             </div>
-            <button className="us-btn us-btn-primary" onClick={() => fileInput.current?.click()} disabled={uploading}
-              style={{ padding: "10px 18px", whiteSpace: "nowrap" }}>
-              {uploading ? <Heart size={16} className="us-spin" /> : <Upload size={16} />} {uploading ? "Uploading…" : "Choose file"}
-            </button>
-            <input ref={fileInput} type="file" accept="video/*,.mp4,.mov,.webm,.m4v" onChange={handleUpload} style={{ display: "none" }} />
-          </div>
+          )}
+          <input ref={fileInput} type="file" accept="video/*,.mp4,.mov,.webm,.m4v" onChange={handleUpload} style={{ display: "none" }} />
         </section>
       )}
 
