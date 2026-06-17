@@ -622,8 +622,8 @@ function Images({ photos, myId, idToName, flash, reload }) {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
-    if (file.size > 8 * 1024 * 1024) {
-      flash("Image is larger than 8 MB — please pick a smaller one.");
+    if (file.size > 20 * 1024 * 1024) {
+      flash("Image is larger than 20 MB — please pick a smaller one.");
       return;
     }
     setUploading(true);
