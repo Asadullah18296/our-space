@@ -78,10 +78,12 @@ alter table public.plans    enable row level security;
 alter table public.photos   enable row level security;
 alter table public.songs    enable row level security;
 
--- profiles: everyone logged in can read; you can only edit your own row
+-- profiles: everyone logged in can read; you can only create/edit your own row
 drop policy if exists "profiles_read"   on public.profiles;
+drop policy if exists "profiles_insert" on public.profiles;
 drop policy if exists "profiles_modify" on public.profiles;
 create policy "profiles_read"   on public.profiles for select to authenticated using (true);
+create policy "profiles_insert" on public.profiles for insert to authenticated with check (auth.uid() = id);
 create policy "profiles_modify" on public.profiles for update to authenticated using (auth.uid() = id) with check (auth.uid() = id);
 
 -- plans / photos / songs: any logged-in partner has full access

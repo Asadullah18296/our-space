@@ -482,12 +482,13 @@ function ProfileSetup({ session, takenRoles, onDone, onSignOut }) {
     if (!role) { setError("Choose which one is you."); return; }
     setBusy(true); setError("");
     const finalName = name.trim() || (role === "a" ? DEFAULT_NAMES.a : DEFAULT_NAMES.b);
+    // upsert so it works even if no profile row exists yet (e.g. account
+    // created before the trigger). Needs the profiles insert/update RLS policy.
     const { error } = await supabase
       .from("profiles")
-      .update({ role, name: finalName })
-      .eq("id", session.user.id);
+      .upsert({ id: session.user.id, role, name: finalName }, { onConflict: "id" });
     setBusy(false);
-    if (error) { setError("Couldn't save — please try again."); return; }
+    if (error) { setError(error.message || "Couldn't save — please try again."); return; }
     await onDone();
   };
 
