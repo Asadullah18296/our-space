@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Moon, Star, Heart, Image as ImageIcon, Music, ListChecks, LogOut, Plus, Trash2, Upload, Check, Play, X, Lock } from "lucide-react";
+import { Moon, Star, Heart, Image as ImageIcon, Music, ListChecks, LogOut, Plus, Trash2, Upload, Check, Play, X, Lock, Video as VideoIcon, NotebookPen, Send } from "lucide-react";
 import { supabase } from "./supabase.js";
 
 /*
@@ -52,6 +52,24 @@ const getYouTubeId = (url) => {
 };
 
 const isAudioSrc = (s) => /\.(mp3|wav|ogg|m4a|aac)(\?|$)/i.test(s) || String(s).startsWith("data:audio");
+
+// TikTok video id from a full URL (e.g. tiktok.com/@user/video/123…)
+const getTikTokId = (url) => {
+  const m = String(url).match(/tiktok\.com\/(?:@[\w.-]+\/video|v|embed)\/(\d+)/);
+  return m ? m[1] : null;
+};
+// Instagram post/reel shortcode (e.g. instagram.com/reel/ABC123/)
+const getInstagramCode = (url) => {
+  const m = String(url).match(/instagram\.com\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/);
+  return m ? m[1] : null;
+};
+// Classify a pasted video link into a kind we know how to play.
+const classifyVideoLink = (url) => {
+  if (getYouTubeId(url)) return "yt";
+  if (getTikTokId(url)) return "tiktok";
+  if (getInstagramCode(url)) return "instagram";
+  return "link";
+};
 
 // Fetch title / author / thumbnail for a media link (CORS-friendly, no key needed).
 const fetchLinkMeta = async (url) => {
@@ -218,6 +236,8 @@ export default function App() {
   const [plans, setPlans] = useState([]);
   const [photos, setPhotos] = useState([]);
   const [songs, setSongs] = useState([]);
+  const [videos, setVideos] = useState([]);
+  const [notes, setNotes] = useState([]);
 
   const flash = useCallback((msg) => {
     setNotice(msg);
@@ -289,23 +309,45 @@ export default function App() {
     setSongs(data || []);
   }, []);
 
+  const loadVideos = useCallback(async () => {
+    // videos disappear after 2 days — remove older files + rows first
+    const cutoff = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: old } = await supabase.from("videos").select("id, path").lt("created_at", cutoff);
+    if (old && old.length) {
+      const paths = old.map((o) => o.path).filter(Boolean);
+      if (paths.length) await supabase.storage.from("videos").remove(paths);
+      await supabase.from("videos").delete().lt("created_at", cutoff);
+    }
+    const { data } = await supabase.from("videos").select("*").order("created_at", { ascending: false });
+    setVideos(data || []);
+  }, []);
+
+  const loadNotes = useCallback(async () => {
+    const { data } = await supabase.from("notes").select("*").order("created_at", { ascending: false });
+    setNotes(data || []);
+  }, []);
+
   // ---- Load everything once logged in, and subscribe to live changes ----
   useEffect(() => {
-    if (!session) { setProfiles([]); setPlans([]); setPhotos([]); setSongs([]); return; }
+    if (!session) { setProfiles([]); setPlans([]); setPhotos([]); setSongs([]); setVideos([]); setNotes([]); return; }
     loadProfiles();
     loadPlans();
     loadPhotos();
     loadSongs();
+    loadVideos();
+    loadNotes();
 
     const ch = supabase
       .channel("our-space")
       .on("postgres_changes", { event: "*", schema: "public", table: "plans" }, loadPlans)
       .on("postgres_changes", { event: "*", schema: "public", table: "photos" }, loadPhotos)
       .on("postgres_changes", { event: "*", schema: "public", table: "songs" }, loadSongs)
+      .on("postgres_changes", { event: "*", schema: "public", table: "videos" }, loadVideos)
+      .on("postgres_changes", { event: "*", schema: "public", table: "notes" }, loadNotes)
       .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, loadProfiles)
       .subscribe();
     return () => { supabase.removeChannel(ch); };
-  }, [session, loadProfiles, loadPlans, loadPhotos, loadSongs]);
+  }, [session, loadProfiles, loadPlans, loadPhotos, loadSongs, loadVideos, loadNotes]);
 
   const signOut = async () => {
     await supabase.auth.signOut();
@@ -359,7 +401,9 @@ export default function App() {
         {[
           { id: "routine", label: "Daily Plan", icon: ListChecks },
           { id: "images", label: "Photos", icon: ImageIcon },
+          { id: "videos", label: "Videos", icon: VideoIcon },
           { id: "music", label: "Music", icon: Music },
+          { id: "notes", label: "Notes", icon: NotebookPen },
         ].map(({ id, label, icon: Icon }) => (
           <button key={id} className={`us-tab${tab === id ? " active" : ""}`} onClick={() => setTab(id)}>
             <Icon size={16} /> {label}
@@ -385,8 +429,14 @@ export default function App() {
         {tab === "images" && (
           <Images key="images" photos={photos} myId={myId} idToName={idToName} flash={flash} reload={loadPhotos} />
         )}
+        {tab === "videos" && (
+          <VideosSection key="videos" videos={videos} myId={myId} myName={myName} flash={flash} reload={loadVideos} />
+        )}
         {tab === "music" && (
           <MusicSection key="music" songs={songs} myId={myId} myName={myName} flash={flash} reload={loadSongs} />
+        )}
+        {tab === "notes" && (
+          <Notes key="notes" notes={notes} myId={myId} idToName={idToName} flash={flash} reload={loadNotes} />
         )}
       </main>
     </div>
@@ -1008,6 +1058,367 @@ function MusicSection({ songs, myId, myName, flash, reload }) {
                   <Play size={16} fill="currentColor" />
                 </span>
                 <button className="us-icon-btn" onClick={(e) => { e.stopPropagation(); removeSong(r.raw); }} aria-label="Remove song"><Trash2 size={16} /></button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Videos ----------
+// A sticky player panel for a chosen video (file, YouTube, TikTok, Instagram or link).
+function VideoPlayer({ row, onClose }) {
+  const [fileUrl, setFileUrl] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    if (row.kind === "file" && row.path) {
+      setLoading(true);
+      supabase.storage.from("videos").createSignedUrl(row.path, 3600)
+        .then(({ data }) => { if (alive) setFileUrl(data?.signedUrl || null); })
+        .finally(() => { if (alive) setLoading(false); });
+    }
+    return () => { alive = false; };
+  }, [row]);
+
+  useEffect(() => {
+    const onKey = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Build a privacy-friendly embed for the link kinds.
+  let embedUrl = null;
+  let pad = "56.25%"; // 16:9 default
+  if (row.kind === "yt") {
+    embedUrl = `https://www.youtube-nocookie.com/embed/${row.yt}?autoplay=1&rel=0`;
+  } else if (row.kind === "tiktok") {
+    const id = getTikTokId(row.src);
+    embedUrl = id ? `https://www.tiktok.com/embed/v2/${id}` : null;
+    pad = "150%"; // portrait
+  } else if (row.kind === "instagram") {
+    embedUrl = `${String(row.src).split("?")[0].replace(/\/$/, "")}/embed`;
+    pad = "125%"; // mostly portrait
+  }
+
+  return (
+    <div className="us-card us-enter-pop" style={{ position: "sticky", top: 78, zIndex: 6,
+      background: "linear-gradient(135deg, var(--surface), var(--surface2))", boxShadow: "0 14px 44px rgba(0,0,0,.55)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 14 }}>
+        <span style={{ width: 56, height: 56, borderRadius: 12, flexShrink: 0, background: "linear-gradient(135deg, var(--accent), var(--accent2))", display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+          <VideoIcon size={24} color="var(--on-accent)" />
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase", color: "var(--accent2)", fontWeight: 700 }}>Now playing</div>
+          <div style={{ fontSize: 17, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.title}</div>
+          {row.author && <div style={{ color: "var(--muted)", fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.author}</div>}
+        </div>
+        <button className="us-icon-btn" onClick={onClose} aria-label="Close player"><X size={20} /></button>
+      </div>
+
+      {row.kind === "file" ? (
+        loading ? (
+          <p style={{ color: "var(--muted)", fontSize: 14, margin: 0 }}>Loading…</p>
+        ) : fileUrl ? (
+          <video src={fileUrl} controls autoPlay playsInline style={{ width: "100%", maxHeight: "70vh", borderRadius: 12, background: "#000", display: "block" }} />
+        ) : (
+          <p style={{ color: "var(--muted)", fontSize: 14, margin: 0 }}>Couldn't load this video.</p>
+        )
+      ) : embedUrl ? (
+        <div style={{ position: "relative", paddingTop: pad, maxWidth: pad === "56.25%" ? "100%" : 420, marginInline: "auto", width: "100%", borderRadius: 12, overflow: "hidden", background: "#000" }}>
+          <iframe
+            title={row.title}
+            src={embedUrl}
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: 0 }}
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+            allowFullScreen
+          />
+        </div>
+      ) : (
+        <a className="us-btn us-btn-primary" href={row.src} target="_blank" rel="noreferrer" style={{ padding: "11px 18px", textDecoration: "none" }}>
+          Open in a new tab ↗
+        </a>
+      )}
+    </div>
+  );
+}
+
+function VideosSection({ videos, myId, myName, flash, reload }) {
+  const [url, setUrl] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [panel, setPanel] = useState(null);   // null | "link" | "upload"
+  const [playing, setPlaying] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const fileInput = useRef(null);
+
+  const lookUp = async (link) => {
+    const u = link.trim();
+    if (!u) { setPreview(null); return; }
+    setLoading(true);
+    setPreview(await fetchLinkMeta(u));
+    setLoading(false);
+  };
+
+  const addLink = async () => {
+    const u = url.trim();
+    if (!u) return;
+    setLoading(true);
+    const meta = preview || (await fetchLinkMeta(u));
+    const kind = classifyVideoLink(u);
+    const { error } = await supabase.from("videos").insert({
+      kind,
+      title: meta?.title || u,
+      author_name: meta?.author || "",
+      yt: kind === "yt" ? getYouTubeId(u) : null,
+      src: u,
+      thumb: meta?.thumb || null,
+      added_by: myId,
+    });
+    setLoading(false);
+    setUrl(""); setPreview(null);
+    if (error) { flash("Couldn't add that link — try again."); return; }
+    await reload();
+  };
+
+  const handleUpload = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!/video\//.test(file.type) && !/\.(mp4|mov|webm|m4v|ogg)$/i.test(file.name)) {
+      flash("That doesn't look like a video — pick an mp4/mov.");
+      return;
+    }
+    if (file.size > 50 * 1024 * 1024) {
+      flash("Video larger than 50 MB — please use a shorter clip.");
+      return;
+    }
+    setUploading(true);
+    const ext = (file.name.split(".").pop() || "mp4").toLowerCase();
+    const path = `${crypto.randomUUID()}.${ext}`;
+    const up = await supabase.storage.from("videos").upload(path, file, { contentType: file.type, upsert: false });
+    if (up.error) { setUploading(false); flash("Upload failed — please try again."); return; }
+    const { error } = await supabase.from("videos").insert({
+      kind: "file",
+      title: file.name.replace(/\.[^.]+$/, ""),
+      author_name: myName,
+      path,
+      added_by: myId,
+    });
+    setUploading(false);
+    if (error) { flash("Saved the file but couldn't list it — try again."); return; }
+    await reload();
+  };
+
+  const removeVideo = async (v) => {
+    if (playing?.id === v.id) setPlaying(null);
+    if (v.kind === "file" && v.path) await supabase.storage.from("videos").remove([v.path]);
+    const { error } = await supabase.from("videos").delete().eq("id", v.id);
+    if (error) flash("Couldn't remove that — try again.");
+    await reload();
+  };
+
+  const badgeFor = (k) => ({ yt: "YouTube", tiktok: "TikTok", instagram: "Instagram", file: "Upload", link: "Link" }[k] || "Link");
+
+  const rows = videos.map((v) => ({
+    id: v.id, kind: v.kind, title: v.title || v.src || "Untitled", author: v.author_name || "",
+    thumb: v.thumb || "", src: v.src, yt: v.yt, path: v.path, badge: badgeFor(v.kind), raw: v,
+  }));
+
+  const openPanel = (which) => setPanel((p) => (p === which ? null : which));
+
+  return (
+    <div className="us-enter" style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button className={`us-tab${panel === "link" ? " active" : ""}`} onClick={() => openPanel("link")}>
+          <Plus size={16} /> Add by link
+        </button>
+        <button className={`us-tab${panel === "upload" ? " active" : ""}`} onClick={() => openPanel("upload")}>
+          <Upload size={16} /> Upload video
+        </button>
+      </div>
+
+      {panel === "link" && (
+        <section className="us-card us-enter" style={{ minWidth: 0 }}>
+          <p style={{ color: "var(--muted)", fontSize: 13, margin: "0 0 12px" }}>
+            Paste a TikTok, Instagram or YouTube link — it plays right here.
+          </p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              className="us-input"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              onBlur={(e) => lookUp(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && addLink()}
+              placeholder="Paste a video link (TikTok, Instagram, YouTube…)"
+            />
+            <button className="us-btn us-btn-primary" onClick={addLink} disabled={loading}
+              style={{ padding: "0 18px", whiteSpace: "nowrap" }}>
+              {loading ? "…" : <><Plus size={18} /> Add</>}
+            </button>
+          </div>
+          {preview && (
+            <div className="us-enter" style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 12, padding: 10,
+              background: "var(--night-deep)", borderRadius: 11, border: "1px solid var(--line)" }}>
+              {preview.thumb
+                ? <img src={preview.thumb} alt="" style={{ width: 48, height: 48, borderRadius: 8, objectFit: "cover" }} />
+                : <span style={{ width: 48, height: 48, borderRadius: 8, background: "var(--surface2)", display: "inline-flex", alignItems: "center", justifyContent: "center" }}><VideoIcon size={20} color="var(--accent)" /></span>}
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{preview.title || "Untitled"}</div>
+                {preview.author && <div style={{ color: "var(--muted)", fontSize: 12 }}>{preview.author}</div>}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
+      {panel === "upload" && (
+        <section className="us-card us-enter" style={{ minWidth: 0, background: "linear-gradient(135deg, var(--surface), var(--surface2))" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+              <div className="us-serif" style={{ fontSize: 20, fontWeight: 600, color: "var(--accent2)" }}>Upload a video</div>
+              <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 2 }}>
+                A short clip (up to 50 MB), stored privately. Videos clear after 2 days.
+              </div>
+            </div>
+            <button className="us-btn us-btn-primary" onClick={() => fileInput.current?.click()} disabled={uploading}
+              style={{ padding: "10px 18px", whiteSpace: "nowrap" }}>
+              {uploading ? <Heart size={16} className="us-spin" /> : <Upload size={16} />} {uploading ? "Uploading…" : "Choose file"}
+            </button>
+            <input ref={fileInput} type="file" accept="video/*,.mp4,.mov,.webm,.m4v" onChange={handleUpload} style={{ display: "none" }} />
+          </div>
+        </section>
+      )}
+
+      {playing && <VideoPlayer row={playing} onClose={() => setPlaying(null)} />}
+
+      {rows.length === 0 ? (
+        <div className="us-card" style={{ textAlign: "center", padding: "40px 22px" }}>
+          <span style={{ width: 64, height: 64, borderRadius: 18, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "center",
+            background: "linear-gradient(135deg, var(--accent), var(--accent2))", boxShadow: "0 10px 28px var(--glow)" }}>
+            <VideoIcon size={28} color="var(--on-accent)" />
+          </span>
+          <p className="us-serif" style={{ color: "var(--text)", fontSize: 21, margin: "16px 0 4px" }}>No videos yet</p>
+          <p style={{ color: "var(--muted)", fontSize: 14, margin: 0 }}>
+            Paste a TikTok/Instagram/YouTube link, or upload a short clip — you’ll both see it here.
+          </p>
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {rows.map((r, i) => {
+            const active = playing?.id === r.id;
+            return (
+              <div key={r.id} className="us-row us-enter" onClick={() => setPlaying(r)} role="button" tabIndex={0}
+                onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setPlaying(r)}
+                style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 12px", cursor: "pointer",
+                  background: active ? "var(--surface2)" : "var(--surface)", border: `1px solid ${active ? "var(--accent)" : "var(--line)"}`,
+                  borderRadius: 14, animationDelay: `${i * 0.04}s` }}>
+                {r.thumb
+                  ? <img src={r.thumb} alt="" style={{ width: 46, height: 46, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />
+                  : <span style={{ width: 46, height: 46, borderRadius: 10, flexShrink: 0, background: "linear-gradient(135deg, var(--accent), var(--accent2))", display: "inline-flex", alignItems: "center", justifyContent: "center" }}><VideoIcon size={20} color="var(--on-accent)" /></span>}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 15, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</div>
+                  <div style={{ color: "var(--muted)", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {r.author ? `${r.author} · ${r.badge}` : r.badge}
+                  </div>
+                </div>
+                <span aria-hidden style={{ width: 34, height: 34, borderRadius: "50%", flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center",
+                  background: active ? "linear-gradient(135deg, var(--accent), var(--accent2))" : "transparent",
+                  border: active ? "none" : "1px solid var(--line)", color: active ? "var(--on-accent)" : "var(--accent2)" }}>
+                  <Play size={16} fill="currentColor" />
+                </span>
+                <button className="us-icon-btn" onClick={(e) => { e.stopPropagation(); removeVideo(r.raw); }} aria-label="Remove video"><Trash2 size={16} /></button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Notes (shared notebook) ----------
+function Notes({ notes, myId, idToName, flash, reload }) {
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const fmtTime = (iso) =>
+    new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+  const add = async () => {
+    const t = draft.trim();
+    if (!t) return;
+    setBusy(true);
+    setDraft("");
+    const { error } = await supabase.from("notes").insert({ text: t, author: myId });
+    setBusy(false);
+    if (error) { flash("Couldn't save your note — try again."); setDraft(t); return; }
+    await reload();
+  };
+
+  const remove = async (id) => {
+    const { error } = await supabase.from("notes").delete().eq("id", id);
+    if (error) flash("Couldn't remove that — try again.");
+    await reload();
+  };
+
+  return (
+    <div className="us-enter" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Write box */}
+      <div className="us-card" style={{ background: "linear-gradient(135deg, var(--surface), var(--surface2))" }}>
+        <div className="us-serif" style={{ fontSize: 22, fontWeight: 600, color: "var(--accent2)", marginBottom: 4 }}>Our notebook</div>
+        <p style={{ color: "var(--muted)", fontSize: 13, margin: "0 0 12px" }}>
+          Write anything — how you feel, a thought, a little message. You’ll both see it here.
+        </p>
+        <textarea
+          className="us-input"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) add(); }}
+          placeholder="What's on your heart?"
+          rows={3}
+          style={{ resize: "vertical", minHeight: 84, lineHeight: 1.5 }}
+        />
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+          <button className="us-btn us-btn-primary" onClick={add} disabled={busy || !draft.trim()} style={{ padding: "10px 18px" }}>
+            {busy ? <Heart size={16} className="us-spin" /> : <Send size={16} />} Write it down
+          </button>
+        </div>
+      </div>
+
+      {/* Entries */}
+      {notes.length === 0 ? (
+        <div className="us-card" style={{ textAlign: "center", padding: "44px 22px" }}>
+          <span style={{ width: 68, height: 68, borderRadius: 20, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "center",
+            background: "linear-gradient(135deg, var(--accent), var(--accent2))", boxShadow: "0 12px 30px var(--glow)" }}>
+            <NotebookPen size={30} color="var(--on-accent)" />
+          </span>
+          <p className="us-serif" style={{ color: "var(--text)", fontSize: 21, margin: "16px 0 4px" }}>Nothing written yet</p>
+          <p style={{ color: "var(--muted)", fontSize: 14, margin: 0, maxWidth: 360, marginInline: "auto", lineHeight: 1.6 }}>
+            This is your shared little book. Whatever you write here, the other one will see.
+          </p>
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {notes.map((n, i) => {
+            const mine = n.author === myId;
+            return (
+              <div key={n.id} className="us-card us-enter" style={{ padding: "16px 18px", animationDelay: `${i * 0.04}s`,
+                borderLeft: `3px solid ${mine ? "var(--accent)" : "var(--gold)"}` }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                    <Heart size={13} fill={mine ? "var(--accent)" : "var(--gold)"} color={mine ? "var(--accent)" : "var(--gold)"} />
+                    <span style={{ fontWeight: 700, fontSize: 14, color: mine ? "var(--accent2)" : "var(--gold)" }}>
+                      {idToName[n.author] || "Someone"}
+                    </span>
+                    <span style={{ color: "var(--muted)", fontSize: 12 }}>· {fmtTime(n.created_at)}</span>
+                  </div>
+                  <button className="us-icon-btn" onClick={() => remove(n.id)} aria-label="Delete note"><Trash2 size={15} /></button>
+                </div>
+                <div style={{ fontSize: 15, lineHeight: 1.6, color: "var(--text)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{n.text}</div>
               </div>
             );
           })}

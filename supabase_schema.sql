@@ -67,6 +67,30 @@ create table if not exists public.songs (
   created_at timestamptz not null default now()
 );
 
+-- ---------- 5. VIDEOS (short clips in storage OR a link) ----------
+create table if not exists public.videos (
+  id          uuid primary key default gen_random_uuid(),
+  kind        text not null check (kind in ('file','yt','tiktok','instagram','link')),
+  title       text,
+  author_name text,
+  path        text,                      -- storage path inside 'videos' (kind=file)
+  src         text,                      -- original url (links)
+  yt          text,                      -- youtube id (kind=yt)
+  thumb       text,                      -- cover image url, if any
+  added_by    uuid references auth.users(id) on delete set null,
+  created_at  timestamptz not null default now()
+);
+create index if not exists videos_created_idx on public.videos(created_at);
+
+-- ---------- 6. NOTES (shared notebook — both partners read & write) ----------
+create table if not exists public.notes (
+  id         uuid primary key default gen_random_uuid(),
+  text       text not null,
+  author     uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index if not exists notes_created_idx on public.notes(created_at);
+
 -- ============================================================
 --  ROW LEVEL SECURITY
 --  This is a private app for exactly two trusted people, so any
@@ -77,6 +101,8 @@ alter table public.profiles enable row level security;
 alter table public.plans    enable row level security;
 alter table public.photos   enable row level security;
 alter table public.songs    enable row level security;
+alter table public.videos   enable row level security;
+alter table public.notes    enable row level security;
 
 -- profiles: everyone logged in can read; you can only create/edit your own row
 drop policy if exists "profiles_read"   on public.profiles;
@@ -96,6 +122,12 @@ create policy "photos_all" on public.photos for all to authenticated using (true
 drop policy if exists "songs_all"  on public.songs;
 create policy "songs_all"  on public.songs  for all to authenticated using (true) with check (true);
 
+drop policy if exists "videos_all" on public.videos;
+create policy "videos_all" on public.videos for all to authenticated using (true) with check (true);
+
+drop policy if exists "notes_all"  on public.notes;
+create policy "notes_all"  on public.notes  for all to authenticated using (true) with check (true);
+
 -- ============================================================
 --  GRANTS (needed because "auto-expose new tables" is OFF)
 -- ============================================================
@@ -104,6 +136,8 @@ grant select, insert, update, delete on public.profiles to authenticated;
 grant select, insert, update, delete on public.plans    to authenticated;
 grant select, insert, update, delete on public.photos   to authenticated;
 grant select, insert, update, delete on public.songs    to authenticated;
+grant select, insert, update, delete on public.videos   to authenticated;
+grant select, insert, update, delete on public.notes    to authenticated;
 
 -- ============================================================
 --  STORAGE BUCKETS (private) + policies
@@ -114,6 +148,10 @@ on conflict (id) do nothing;
 
 insert into storage.buckets (id, name, public)
 values ('music','music', false)
+on conflict (id) do nothing;
+
+insert into storage.buckets (id, name, public)
+values ('videos','videos', false)
 on conflict (id) do nothing;
 
 -- any logged-in partner can read/upload/delete files in these two buckets
@@ -128,6 +166,12 @@ create policy "music_bucket_all" on storage.objects
   for all to authenticated
   using (bucket_id = 'music')
   with check (bucket_id = 'music');
+
+drop policy if exists "videos_bucket_all" on storage.objects;
+create policy "videos_bucket_all" on storage.objects
+  for all to authenticated
+  using (bucket_id = 'videos')
+  with check (bucket_id = 'videos');
 
 -- ============================================================
 --  REALTIME (live sync between the two partners)
@@ -145,5 +189,15 @@ end $$;
 do $$
 begin
   alter publication supabase_realtime add table public.songs;
+exception when duplicate_object then null;
+end $$;
+do $$
+begin
+  alter publication supabase_realtime add table public.videos;
+exception when duplicate_object then null;
+end $$;
+do $$
+begin
+  alter publication supabase_realtime add table public.notes;
 exception when duplicate_object then null;
 end $$;
